@@ -1,0 +1,9 @@
+express: El motor del servidor web.
+
+pg: El conector oficial para que Node.js pueda comunicarse con PostgreSQL.
+
+cors: Un guardia de seguridad que permite que la web (en un puerto) y la app (en otro) puedan hacerle peticiones al backend sin ser bloqueadas.
+
+dotenv: Para manejar las contraseñas y variables de entorno de forma segura (clave para cuando pasemos a AWS).
+
+nodemon: herramienta de desarrollo para que el servidor se reinicie solo cada vez que guardamos un cambio
