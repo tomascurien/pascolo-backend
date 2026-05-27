@@ -5,6 +5,7 @@ const pool = require('./db');
 const jwt = require('jsonwebtoken');
 const app = express();
 const PORT = process.env.PORT || 3001;
+const bcrypt = require('bcryptjs');
 
 // --- MIDDLEWARES ---
 // Permite que otras aplicaciones (tu web y app) se conecten
@@ -335,6 +336,136 @@ app.get('/api/produccion-leche', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Error al obtener historial de leche" });
   }
+});
+
+app.get('/api/productos', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM productos ORDER BY id');
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Error al buscar productos:", err);
+        res.status(500).json({ error: "Error del servidor" });
+    }
+});
+
+app.get('/api/productos/:id', async (req, res) => {
+    const { id } = req.get;
+    try {
+        // 1. Traemos los datos básicos del producto
+        const productoRes = await pool.query('SELECT * FROM productos WHERE id = $1', [id]);
+        
+        if (productoRes.rows.length === 0) {
+            return res.status(404).json({ error: "Producto no encontrado" });
+        }
+
+        // 2. Traemos sus formatos (presentaciones) calculando el stock físico disponible real
+        const formatosRes = await pool.query(`
+            SELECT 
+                pres.id,
+                pres.formato,
+                pres.peso_estimado_kg,
+                COALESCE(SUM(sf.cantidad_unidades_disponibles), 0) AS stock_disponible
+            FROM presentaciones pres
+            LEFT JOIN lote_items li ON pres.id = li.presentacion_id
+            LEFT JOIN stock_fisico sf ON li.id = sf.lote_item_id
+            WHERE pres.producto_id = $1
+            GROUP BY pres.id, pres.formato, pres.peso_estimado_kg
+            ORDER BY pres.id
+        `, [id]);
+
+        const producto = productoRes.rows[0];
+        producto.formatos = formatosRes.rows;
+
+        res.json(producto);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Error al obtener el detalle del producto" });
+    }
+});
+
+// 1. ENDPOINT DE LOGIN
+app.post('/api/admin/login', async (req, res) => {
+    const { usuario, password } = req.body;
+    try {
+        const result = await pool.query('SELECT * FROM usuarios WHERE usuario = $1', [usuario]);
+        const user = result.rows[0];
+
+        if (!user) return res.status(401).json({ error: "Usuario no encontrado" });
+
+        // Comparamos la clave ingresada con el hash de la base de datos
+        const passwordCorrecto = await bcrypt.compare(password, user.password_hash);
+        if (!passwordCorrecto) return res.status(401).json({ error: "Contraseña incorrecta" });
+
+        // Si todo está bien, firmamos el token (JWT)
+        const token = jwt.sign(
+            { id: user.id, rol: user.rol }, 
+            process.env.JWT_SECRET || 'clave_secreta_pascolo', 
+            { expiresIn: '12h' }
+        );
+
+        res.json({ token });
+    } catch (err) {
+        res.status(500).json({ error: "Error en el servidor" });
+    }
+});
+
+// 2. MIDDLEWARE DE PROTECCIÓN (El Guardián)
+const validarToken = (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(403).json({ error: "Acceso denegado" });
+
+    try {
+        const verificado = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta_pascolo');
+        req.user = verificado;
+        next(); // Permite pasar a la siguiente función
+    } catch (err) {
+        res.status(401).json({ error: "Token inválido o expirado" });
+    }
+};
+
+// DELETE: Eliminar un lote de leche
+app.delete('/api/leche/lotes/:id', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        // Opcional: Podrías hacer una validación de seguridad extra acá
+        // para asegurarte de que el usuario que lo pide sea admin.
+        
+        const result = await pool.query('DELETE FROM produccion_leche WHERE id = $1 RETURNING *', [id]);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: 'Lote no encontrado' });
+        }
+        
+        res.json({ mensaje: 'Lote eliminado correctamente', loteBorrado: result.rows[0] });
+    } catch (err) {
+        console.error("Error al borrar lote de leche:", err);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// GET: Historial de lotes de queso (Últimos 7 días)
+app.get('/api/quesos/historial-reciente', async (req, res) => {
+    try {
+        // Traemos los lotes ordenados desde el más nuevo al más viejo
+        // Usamos INTERVAL '7 days' de PostgreSQL para filtrar automáticamente
+        const result = await pool.query(`
+            SELECT 
+                lp.id, 
+                lp.codigo_lote, 
+                lp.fecha_elaboracion,
+                u.nombre AS operario
+            FROM lotes_produccion lp
+            LEFT JOIN usuarios u ON lp.creado_por = u.id
+            WHERE lp.fecha_elaboracion >= CURRENT_DATE - INTERVAL '7 days'
+            ORDER BY lp.fecha_elaboracion DESC
+        `);
+        
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Error al obtener historial de quesos:", err);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
 });
 
 // --- INICIO DEL SERVIDOR ---
